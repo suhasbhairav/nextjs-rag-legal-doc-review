@@ -1,114 +1,379 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-const starterPrompts = [
-  "A legal document review RAG starter with risk summaries and non-lawyer guardrails.",
-  "Create a production-ready workflow with risks, data flow, and owner handoffs.",
-  "Generate a sample user journey and API contract for this starter.",
-  "Give me a launch checklist and extension roadmap for this template."
+const sampleDocument = `Mutual Services Agreement
+
+Either party may terminate this agreement for material breach if the breach remains uncured for 30 days after written notice.
+
+The vendor will defend the customer against third-party claims alleging that the service infringes intellectual property rights, subject to prompt notice and reasonable cooperation.
+
+Liability is capped at the fees paid in the twelve months before the claim, except for confidentiality breaches, indemnity obligations, and payment obligations.
+
+This agreement is governed by the laws of Delaware. Disputes must be filed in the state or federal courts located in New Castle County, Delaware.`;
+
+const quickPrompts = [
+  "Summarize the termination rights and cure period.",
+  "Which obligations are excluded from the liability cap?",
+  "Find indemnity language and explain the conditions.",
+  "What governing law and venue apply?",
 ];
-const metrics = [
-  "Server route",
-  "Responsive UI",
-  "Env setup"
-];
-const steps = [
-  "Capture input",
-  "Run server route",
-  "Return structured output"
-];
-const chips = [
-  "Retrieval workflow",
-  "Next.js",
-  "OpenAI",
-  "Mobile ready"
-];
-const endpoint = "/api/run";
 
 export default function Home() {
-  const [prompt, setPrompt] = useState(starterPrompts[0]);
-  const [result, setResult] = useState(null);
-  const [isRunning, setIsRunning] = useState(false);
+  const [documents, setDocuments] = useState([]);
+  const [title, setTitle] = useState("Mutual Services Agreement");
+  const [text, setText] = useState(sampleDocument);
+  const [file, setFile] = useState(null);
+  const [message, setMessage] = useState(quickPrompts[0]);
+  const [conversationId, setConversationId] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [selectedCitation, setSelectedCitation] = useState(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isAsking, setIsAsking] = useState(false);
   const [error, setError] = useState("");
 
-  const status = useMemo(() => {
-    if (isRunning) return "Running";
-    if (result?.demo) return "Local response";
-    if (result) return "Completed";
-    return "Ready";
-  }, [isRunning, result]);
+  const hasDocuments = documents.length > 0;
+  const lastAssistant = useMemo(
+    () => [...messages].reverse().find((item) => item.role === "assistant"),
+    [messages],
+  );
 
-  async function submit(event) {
+  async function loadDocuments() {
+    const response = await fetch("/api/documents");
+    const data = await response.json();
+    setDocuments(data.documents ?? []);
+  }
+
+  useEffect(() => {
+    let isMounted = true;
+
+    fetch("/api/documents")
+      .then((response) => response.json())
+      .then((data) => {
+        if (isMounted) {
+          setDocuments(data.documents ?? []);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setDocuments([]);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  async function uploadDocument(event) {
     event.preventDefault();
-    const cleanPrompt = prompt.trim();
-    if (!cleanPrompt || isRunning) return;
-
-    setIsRunning(true);
     setError("");
-    setResult(null);
+    setIsUploading(true);
 
     try {
-      const response = await fetch(endpoint, {
+      const formData = new FormData();
+      formData.append("title", title);
+
+      if (file) {
+        formData.append("file", file);
+      } else {
+        formData.append("text", text);
+      }
+
+      const response = await fetch("/api/documents/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: cleanPrompt }),
+        body: formData,
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Template run failed.");
-      setResult(data);
-    } catch (runError) {
-      setError(runError.message);
+
+      if (!response.ok) {
+        throw new Error(data.error || "Document upload failed");
+      }
+
+      setFile(null);
+      await loadDocuments();
+    } catch (uploadError) {
+      setError(uploadError.message);
     } finally {
-      setIsRunning(false);
+      setIsUploading(false);
+    }
+  }
+
+  async function deleteDocument(documentId) {
+    await fetch(`/api/documents/${documentId}`, { method: "DELETE" });
+    await loadDocuments();
+  }
+
+  async function askQuestion(event) {
+    event.preventDefault();
+    const cleanMessage = message.trim();
+
+    if (!cleanMessage) {
+      return;
+    }
+
+    setError("");
+    setIsAsking(true);
+    setSelectedCitation(null);
+    setMessages((current) => [
+      ...current,
+      { role: "user", content: cleanMessage, id: `local-${Date.now()}` },
+    ]);
+    setMessage("");
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId, message: cleanMessage }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Chat failed");
+      }
+
+      setConversationId(data.conversationId);
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: data.answer,
+          citations: data.citations ?? [],
+          results: data.results ?? [],
+          id: `assistant-${Date.now()}`,
+        },
+      ]);
+    } catch (chatError) {
+      setError(chatError.message);
+    } finally {
+      setIsAsking(false);
     }
   }
 
   return (
-    <main className="min-h-screen overflow-x-hidden bg-[#eef7ff] text-[#0d1726]">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1500px] flex-col px-4 py-5 sm:px-6 lg:px-8">
-        <header className="rounded-2xl border bg-white border-sky-950/10 grid gap-5 p-5 lg:grid-cols-[1fr_auto] lg:items-center">
-          <div><p className="text-xs font-black uppercase tracking-[0.18em] opacity-55">Retrieval workflow</p><h1 className="mt-3 text-4xl font-black sm:text-6xl">Next.js RAG Legal Doc Review</h1></div>
-          <div className="rounded-2xl bg-[#dff0ff] p-4"><p className="text-xs font-black uppercase opacity-50">Status</p><p className="mt-2 text-2xl font-black">{status}</p></div>
-        </header>
-        <section className="grid flex-1 gap-4 py-4 lg:grid-cols-[300px_1fr_300px]">
-          <aside className="rounded-2xl border bg-white border-sky-950/10 p-4"><h2 className="font-black">Inputs</h2><div className="mt-3 space-y-2">{starterPrompts.map((example) => (
-                <button
-                  key={example}
-                  className="w-full border border-current/10 bg-white/45 px-3 py-3 text-left text-sm leading-6 opacity-80 transition hover:opacity-100"
-                  onClick={() => setPrompt(example)}
-                  type="button"
-                >
-                  {example}
-                </button>
-              ))}</div></aside>
-          <section className="rounded-2xl border bg-white border-sky-950/10 p-4 sm:p-6"><form className="space-y-3" onSubmit={submit}>
-              <textarea
-                className="min-h-44 w-full resize-y border border-current/10 bg-white/70 px-4 py-3 text-sm leading-7 outline-none placeholder:opacity-40 focus:border-current/30"
-                onChange={(event) => setPrompt(event.target.value)}
-                value={prompt}
-              />
-              <button
-                className="min-h-12 w-full px-5 text-sm font-black transition disabled:cursor-not-allowed disabled:opacity-40 bg-blue-600 text-white hover:bg-blue-700"
-                disabled={isRunning || !prompt.trim()}
-                type="submit"
+    <main className="min-h-screen bg-[#f8f5ef] text-[#231f20]">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-5 sm:px-6 lg:px-8">
+        <header className="flex flex-col gap-2 border-b border-[#d8d6cc] pb-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.08em] text-[#356859]">
+              Legal RAG Review
+            </p>
+            <h1 className="text-3xl font-semibold tracking-normal text-[#182026]">
+              Review contracts with clause-level citations
+            </h1>
+            <p className="mt-2 text-sm text-[#64706b]">
+              Created by{" "}
+              <a
+                className="font-semibold text-[#356859] underline-offset-4 hover:underline"
+                href="https://suhasbhairav.com"
+                rel="noopener noreferrer"
+                target="_blank"
               >
-                {isRunning ? "Running..." : "Ask documents"}
-              </button>
-            </form><div className="mt-5">{error ? <div className="border border-red-400/40 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-100">{error}</div> : null}
-            {result ? (
-              <article className="border border-current/10 bg-white/60 p-4 text-sm leading-7 shadow-sm">
-                <div className="flex flex-wrap items-center gap-2">
-                  <strong>Result</strong>
-                  <span className="border border-current/10 px-2 py-1 text-xs opacity-60">{result.model || "local"}</span>
+                Suhas Bhairav
+              </a>
+            </p>
+          </div>
+          <div className="rounded-md border border-[#d8d6cc] bg-white px-3 py-2 text-sm">
+            text-embedding-3-small · {documents.length} document
+            {documents.length === 1 ? "" : "s"} indexed
+          </div>
+        </header>
+
+        {error ? (
+          <div className="rounded-md border border-[#e0a39a] bg-[#fff4f1] px-4 py-3 text-sm text-[#8a2f25]">
+            {error}
+          </div>
+        ) : null}
+
+        <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
+          <aside className="space-y-4">
+            <section className="rounded-md border border-[#d8d6cc] bg-white p-4">
+              <h2 className="text-lg font-semibold">Add legal document</h2>
+              <form className="mt-4 space-y-3" onSubmit={uploadDocument}>
+                <label className="block text-sm font-medium">
+                  Title
+                  <input
+                    className="mt-1 w-full rounded-md border border-[#c9c7bc] px-3 py-2 outline-none focus:border-[#356859]"
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                  />
+                </label>
+
+                <label className="block text-sm font-medium">
+                  Upload PDF, text, Markdown, or CSV
+                  <input
+                    className="mt-1 w-full rounded-md border border-[#c9c7bc] bg-white px-3 py-2 text-sm"
+                    type="file"
+                    accept=".txt,.md,.markdown,.csv,.pdf,.docx,text/plain,text/markdown,application/pdf"
+                    onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                  />
+                </label>
+
+                <label className="block text-sm font-medium">
+                  Or paste contract text
+                  <textarea
+                    className="mt-1 min-h-48 w-full resize-y rounded-md border border-[#c9c7bc] px-3 py-2 text-sm leading-6 outline-none focus:border-[#356859]"
+                    value={text}
+                    onChange={(event) => setText(event.target.value)}
+                  />
+                </label>
+
+                <button
+                  className="w-full rounded-md bg-[#356859] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#2a5146] disabled:cursor-not-allowed disabled:bg-[#9aa8a2]"
+                  disabled={isUploading}
+                  type="submit"
+                >
+                  {isUploading ? "Indexing clauses..." : "Index legal document"}
+                </button>
+              </form>
+            </section>
+
+            <section className="rounded-md border border-[#d8d6cc] bg-white p-4">
+              <h2 className="text-lg font-semibold">Reviewed documents</h2>
+              <div className="mt-3 space-y-2">
+                {documents.length === 0 ? (
+                  <p className="text-sm leading-6 text-[#64706b]">
+                    Index an agreement, policy, or filing to start grounded review.
+                  </p>
+                ) : (
+                  documents.map((document) => (
+                    <div
+                      className="rounded-md border border-[#e6e3d8] bg-[#fbfbf7] p-3"
+                      key={document.id}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-medium">{document.title}</p>
+                          <p className="mt-1 text-xs text-[#64706b]">
+                            {document.chunkCount} chunks · {document.characters} chars
+                          </p>
+                        </div>
+                        <button
+                          className="rounded-md border border-[#d8d6cc] px-2 py-1 text-xs hover:bg-white"
+                          onClick={() => deleteDocument(document.id)}
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-md border border-[#d8d6cc] bg-white p-4">
+              <h2 className="text-lg font-semibold">Legal prompts</h2>
+              <div className="mt-3 space-y-2">
+                {quickPrompts.map((prompt) => (
+                  <button
+                    className="w-full rounded-md border border-[#e6e3d8] bg-[#fbfbf7] px-3 py-2 text-left text-sm leading-6 hover:border-[#8a6f3d]"
+                    key={prompt}
+                    onClick={() => setMessage(prompt)}
+                    type="button"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </section>
+          </aside>
+
+          <section className="grid min-h-[680px] gap-4 lg:grid-cols-[1fr_320px]">
+            <div className="flex min-h-[680px] flex-col rounded-md border border-[#d8d6cc] bg-white">
+              <div className="border-b border-[#e6e3d8] px-4 py-3">
+                <h2 className="text-lg font-semibold">Clause review chat</h2>
+              </div>
+
+              <div className="flex-1 space-y-4 overflow-y-auto p-4">
+                {messages.length === 0 ? (
+                  <div className="flex h-full min-h-80 items-center justify-center text-center">
+                    <p className="max-w-sm text-sm leading-6 text-[#64706b]">
+                      {hasDocuments
+                        ? "Ask about obligations, risk, definitions, dates, parties, and exceptions."
+                        : "Add a legal source first, then ask a review question about it."}
+                    </p>
+                  </div>
+                ) : (
+                  messages.map((item) => (
+                    <article
+                      className={`max-w-3xl rounded-md px-4 py-3 text-sm leading-6 ${
+                        item.role === "user"
+                          ? "ml-auto bg-[#e8f0ed]"
+                          : "mr-auto border border-[#e6e3d8] bg-[#fbfbf7]"
+                      }`}
+                      key={item.id}
+                    >
+                      <p className="whitespace-pre-wrap">{item.content}</p>
+                      {item.citations?.length ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {item.citations.map((citation, index) => (
+                            <button
+                              className="rounded-md border border-[#b9c8c1] bg-white px-2 py-1 text-xs font-medium text-[#356859] hover:bg-[#f1f7f4]"
+                              key={citation.id}
+                              onClick={() => setSelectedCitation(citation)}
+                              type="button"
+                            >
+                              [{index + 1}] {citation.title}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))
+                )}
+                {isAsking ? (
+                  <div className="mr-auto rounded-md border border-[#e6e3d8] bg-[#fbfbf7] px-4 py-3 text-sm text-[#64706b]">
+                    Retrieving clause evidence...
+                  </div>
+                ) : null}
+              </div>
+
+              <form className="border-t border-[#e6e3d8] p-4" onSubmit={askQuestion}>
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <input
+                    className="min-h-11 flex-1 rounded-md border border-[#c9c7bc] px-3 py-2 outline-none focus:border-[#356859]"
+                    disabled={!hasDocuments || isAsking}
+                    onChange={(event) => setMessage(event.target.value)}
+                    placeholder="Ask about clauses, risks, obligations, or exceptions"
+                    value={message}
+                  />
+                  <button
+                    className="rounded-md bg-[#182026] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:bg-[#9aa0a6]"
+                    disabled={!hasDocuments || isAsking}
+                    type="submit"
+                  >
+                    Ask
+                  </button>
                 </div>
-                <pre className="mt-4 max-h-[420px] overflow-auto whitespace-pre-wrap bg-black/5 p-4 text-sm leading-7">
-                  {result.output || result.clientSecret || JSON.stringify(result, null, 2)}
-                </pre>
-              </article>
-            ) : null}</div></section>
-          <aside className="rounded-2xl border bg-white border-sky-950/10 p-4"><h2 className="font-black">Run steps</h2><div className="mt-3 space-y-3">{steps.map((step, index) => <div className="rounded-2xl bg-[#dff0ff] p-3" key={step}><span className="text-xs font-black opacity-50">0{index + 1}</span><p className="font-bold">{step}</p></div>)}</div></aside>
-        </section>
+              </form>
+            </div>
+
+            <aside className="rounded-md border border-[#d8d6cc] bg-white p-4">
+              <h2 className="text-lg font-semibold">Clause evidence</h2>
+              {selectedCitation ? (
+                <div className="mt-4 rounded-md border border-[#e6e3d8] bg-[#fbfbf7] p-3">
+                  <p className="text-sm font-semibold">{selectedCitation.title}</p>
+                  <p className="mt-1 text-xs text-[#64706b]">
+                    Page {selectedCitation.page}
+                  </p>
+                  <mark className="mt-3 block rounded-md bg-[#fff2a8] px-2 py-2 text-sm leading-6 text-[#1f2933]">
+                    {selectedCitation.quote}
+                  </mark>
+                </div>
+              ) : lastAssistant?.citations?.length ? (
+                <p className="mt-4 text-sm leading-6 text-[#64706b]">
+                  Select a citation under the latest answer to inspect the supporting clause.
+                </p>
+              ) : (
+                <p className="mt-4 text-sm leading-6 text-[#64706b]">
+                  Cited clauses appear here after a grounded legal answer.
+                </p>
+              )}
+            </aside>
+          </section>
+        </div>
       </div>
     </main>
   );
